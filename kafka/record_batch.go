@@ -136,3 +136,7 @@ func (b *RecordBatch) decode(pd PacketDecoder) (err error) {
 	}
 	return err
 }
+
+func (b *RecordBatch) addRecord(r *Record) {
+	b.Records = append(b.Records, r)
+}

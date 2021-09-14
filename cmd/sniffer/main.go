@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/d-ulyanov/kafka-sniffer/kafka"
 	"github.com/d-ulyanov/kafka-sniffer/metrics"
 	"github.com/d-ulyanov/kafka-sniffer/stream"
 
@@ -26,9 +27,9 @@ const (
 
 var (
 	iface      = flag.String("i", "eth0", "Interface to get packets from")
-	dstport    = flag.Uint("p", 9092, "Kafka broker port")
+	port       = flag.String("p", "9092", "Kafka broker port")
 	snaplen    = flag.Int("s", 16<<10, "SnapLen for pcap packet capture")
-	filter     = fmt.Sprintf("tcp and dst port %d", *dstport)
+	filter     = fmt.Sprintf("tcp and port %s", *port)
 	verbose    = flag.Bool("v", false, "Logs every packet in great detail")
 	listenAddr = flag.String("addr", defaultListenAddr, "Address on which sniffer listen the requests")
 	expireTime = flag.Duration("metrics.expire-time", defaultExpireTime, "Expiration time of metric.")
@@ -53,23 +54,23 @@ func main() {
 
 	// init metrics storage
 	metricsStorage := metrics.NewStorage(prometheus.DefaultRegisterer, *expireTime)
+	correlationMap := kafka.NewCorrelationMap()
 
 	// Set up assembly
-	streamPool := tcpassembly.NewStreamPool(stream.NewKafkaStreamFactory(metricsStorage, *verbose))
+	streamPool := tcpassembly.NewStreamPool(
+		stream.NewKafkaStreamFactory(metricsStorage, correlationMap, *port, *verbose))
 	assembler := tcpassembly.NewAssembler(streamPool)
 
 	// Auto-flushing connection state to get packets
 	// without waiting SYN
 	assembler.MaxBufferedPagesTotal = 1000
 	assembler.MaxBufferedPagesPerConnection = 1
-
 	log.Println("reading in packets")
 
 	// Read in packets, pass to assembler.
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	packets := packetSource.Packets()
 	ticker := time.Tick(time.Minute)
-
 	for {
 		select {
 		case packet := <-packets:

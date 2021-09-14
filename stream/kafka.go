@@ -17,12 +17,20 @@ import (
 // KafkaStreamFactory implements tcpassembly.StreamFactory
 type KafkaStreamFactory struct {
 	metricsStorage *metrics.Storage
+	correlationMap *kafka.CorrelationMap
+	brokerPort     string
 	verbose        bool
 }
 
 // NewKafkaStreamFactory assembles streams
-func NewKafkaStreamFactory(metricsStorage *metrics.Storage, verbose bool) *KafkaStreamFactory {
-	return &KafkaStreamFactory{metricsStorage: metricsStorage, verbose: verbose}
+func NewKafkaStreamFactory(metricsStorage *metrics.Storage,
+	correlationMap *kafka.CorrelationMap, port string, verbose bool) *KafkaStreamFactory {
+	return &KafkaStreamFactory{
+		metricsStorage: metricsStorage,
+		correlationMap: correlationMap,
+		brokerPort:     port,
+		verbose:        verbose,
+	}
 }
 
 // New assembles new stream
@@ -32,6 +40,8 @@ func (h *KafkaStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Strea
 		transport:      transport,
 		r:              tcpreader.NewReaderStream(),
 		metricsStorage: h.metricsStorage,
+		correlationMap: h.correlationMap,
+		brokerPort:     h.brokerPort,
 		verbose:        h.verbose,
 	}
 
@@ -45,6 +55,8 @@ type KafkaStream struct {
 	net, transport gopacket.Flow
 	r              tcpreader.ReaderStream
 	metricsStorage *metrics.Storage
+	correlationMap *kafka.CorrelationMap
+	brokerPort     string
 	verbose        bool
 }
 
@@ -63,49 +75,78 @@ func (h *KafkaStream) run() {
 	h.metricsStorage.AddActiveConnectionsTotal(h.net.Src().String())
 
 	for {
-		req, readBytes, err := kafka.DecodeRequest(buf)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return
-		}
-
-		if err != nil {
-			log.Printf("unable to read request to Broker - skipping packet: %s\n", err)
-
-			if _, ok := err.(kafka.PacketDecodingError); ok {
-				_, err := buf.Discard(readBytes)
-				if err != nil {
-					log.Printf("could not discard: %s\n", err)
-				}
+		if h.transport.Src().String() != h.brokerPort {
+			req, readBytes, err := kafka.DecodeRequest(buf)
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return
 			}
 
-			continue
-		}
+			if err != nil {
+				log.Printf("unable to read request to Broker - skipping packet: %s\n", err)
 
-		if h.verbose {
-			log.Printf("got request, key: %d, version: %d, correlationID: %d, clientID: %s\n", req.Key, req.Version, req.CorrelationID, req.ClientID)
-		}
-
-		req.Body.CollectClientMetrics(srcHost)
-
-		switch body := req.Body.(type) {
-		case *kafka.ProduceRequest:
-			for _, topic := range body.ExtractTopics() {
-				if h.verbose {
-					log.Printf("client %s:%s wrote to topic %s", srcHost, srcPort, topic)
+				if _, ok := err.(kafka.PacketDecodingError); ok {
+					_, err := buf.Discard(readBytes)
+					if err != nil {
+						log.Printf("could not discard: %s\n", err)
+					}
 				}
 
-				// add producer and topic relation info into metric
-				h.metricsStorage.AddProducerTopicRelationInfo(h.net.Src().String(), topic)
+				continue
 			}
-		case *kafka.FetchRequest:
-			for _, topic := range body.ExtractTopics() {
-				if h.verbose {
-					log.Printf("client %s:%s read from topic %s", h.net.Src(), h.transport.Src(), topic)
+
+			if h.verbose {
+				log.Printf("got request, key: %d, version: %d, correlationID: %d, clientID: %s\n",
+					req.Key, req.Version, req.CorrelationID, req.ClientID)
+			}
+
+			req.Body.CollectClientMetrics(srcHost)
+
+			switch body := req.Body.(type) {
+			case *kafka.ProduceRequest:
+				for _, topic := range body.ExtractTopics() {
+					if h.verbose {
+						log.Printf("client %s:%s wrote to topic %s", srcHost, srcPort, topic)
+					}
+
+					// add producer and topic relation info into metric
+					h.metricsStorage.AddProducerTopicRelationInfo(h.net.Src().String(), topic)
+				}
+			case *kafka.FetchRequest:
+				h.correlationMap.Add(req.CorrelationID, []int16{req.Key, req.Version})
+				for _, topic := range body.ExtractTopics() {
+					if h.verbose {
+						log.Printf("client %s:%s read from topic %s", h.net.Src(), h.transport.Src(), topic)
+					}
+
+					// add consumer and topic relation info into metric
+					h.metricsStorage.AddConsumerTopicRelationInfo(h.net.Src().String(), topic)
+				}
+			}
+		} else {
+			resp, readBytes, err := kafka.DecodeResponse(buf, h.correlationMap)
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return
+			}
+
+			if err != nil {
+				log.Printf("unable to read response to Broker - skipping packet: %s\n", err)
+
+				if _, ok := err.(kafka.PacketDecodingError); ok {
+					_, err := buf.Discard(readBytes)
+					if err != nil {
+						log.Printf("could not discard: %s\n", err)
+					}
 				}
 
-				// add consumer and topic relation info into metric
-				h.metricsStorage.AddConsumerTopicRelationInfo(h.net.Src().String(), topic)
+				continue
 			}
+
+			if h.verbose {
+				log.Printf("got request, key: %d, version: %d, correlationID: %d, clientID: %s\n",
+					resp.Key, resp.Version, resp.CorrelationID, resp.ClientID)
+			}
+
+			resp.Body.CollectClientMetrics(srcHost)
 		}
 	}
 }

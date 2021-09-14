@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"fmt"
+	"sync"
 )
 
 // Encoder is a simple interface for any type that can be encoded as an array of bytes
@@ -95,4 +96,32 @@ func (v Version) String() string {
 	}
 
 	return fmt.Sprintf("%d.%d.%d", v.version[0], v.version[1], v.version[2])
+}
+
+type CorrelationMap struct {
+	mu      sync.Mutex
+	storage map[int32][]int16
+}
+
+func (c *CorrelationMap) Add(key int32, value []int16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.storage[key] = value
+}
+
+func (c *CorrelationMap) GetAndRemove(key int32) ([]int16, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	val, ok := c.storage[key]
+	delete(c.storage, key)
+
+	return val, ok
+}
+
+func NewCorrelationMap() *CorrelationMap {
+	return &CorrelationMap{
+		storage: make(map[int32][]int16),
+	}
 }

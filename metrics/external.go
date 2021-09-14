@@ -30,10 +30,17 @@ var (
 		Name:      "blocks_requested",
 		Help:      "Total size of a batch in producer request to kafka",
 	}, []string{"client_ip"})
+
+	// ConsumerLag is a prometheus metric. See info field
+	ConsumerLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "consumer_lag_seconds",
+		Help:      "The difference between when the message was sent to the broker and when it was received from the broker in seconds",
+	}, []string{"consumer_ip", "topic", "partition"})
 )
 
 func init() {
-	prometheus.MustRegister(RequestsCount, ProducerBatchLen, ProducerBatchSize, BlocksRequested)
+	prometheus.MustRegister(RequestsCount, ProducerBatchLen, ProducerBatchSize, BlocksRequested, ConsumerLag)
 }
 
 // ClientMetricsCollector is an interface, which allows to collect metrics for concrete client

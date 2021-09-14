@@ -17,7 +17,15 @@ type Records struct {
 	RecordBatch *RecordBatch
 }
 
-func (r *Records) setTypeFromMagic(pd PacketDecoder) error {
+func newLegacyRecords(msgSet *MessageSet) Records {
+	return Records{recordsType: legacyRecords, MsgSet: msgSet}
+}
+
+func newDefaultRecords(batch *RecordBatch) Records {
+	return Records{recordsType: defaultRecords, RecordBatch: batch}
+}
+
+	func (r *Records) setTypeFromMagic(pd PacketDecoder) error {
 	magic, err := magicValue(pd)
 	if err != nil {
 		return err
@@ -51,4 +59,85 @@ func (r *Records) decode(pd PacketDecoder) error {
 		return r.RecordBatch.decode(pd)
 	}
 	return fmt.Errorf("unknown records type: %v", r.recordsType)
+}
+
+func (r *Records) setTypeFromFields() (bool, error) {
+	if r.MsgSet == nil && r.RecordBatch == nil {
+		return true, nil
+	}
+	if r.MsgSet != nil && r.RecordBatch != nil {
+		return false, fmt.Errorf("both MsgSet and RecordBatch are set, but record type is unknown")
+	}
+	r.recordsType = defaultRecords
+	if r.MsgSet != nil {
+		r.recordsType = legacyRecords
+	}
+	return false, nil
+}
+
+func (r *Records) isOverflow() (bool, error) {
+	if r.recordsType == unknownRecords {
+		if empty, err := r.setTypeFromFields(); err != nil || empty {
+			return false, err
+		}
+	}
+
+	switch r.recordsType {
+	case unknownRecords:
+		return false, nil
+	case legacyRecords:
+		if r.MsgSet == nil {
+			return false, nil
+		}
+		return r.MsgSet.OverflowMessage, nil
+	case defaultRecords:
+		return false, nil
+	}
+	return false, fmt.Errorf("unknown records type: %v", r.recordsType)
+}
+
+func (r *Records) numRecords() (int, error) {
+	if r.recordsType == unknownRecords {
+		if empty, err := r.setTypeFromFields(); err != nil || empty {
+			return 0, err
+		}
+	}
+
+	switch r.recordsType {
+	case legacyRecords:
+		if r.MsgSet == nil {
+			return 0, nil
+		}
+		return len(r.MsgSet.Messages), nil
+	case defaultRecords:
+		if r.RecordBatch == nil {
+			return 0, nil
+		}
+		return len(r.RecordBatch.Records), nil
+	}
+	return 0, fmt.Errorf("unknown records type: %v", r.recordsType)
+}
+
+func (r *Records) isPartial() (bool, error) {
+	if r.recordsType == unknownRecords {
+		if empty, err := r.setTypeFromFields(); err != nil || empty {
+			return false, err
+		}
+	}
+
+	switch r.recordsType {
+	case unknownRecords:
+		return false, nil
+	case legacyRecords:
+		if r.MsgSet == nil {
+			return false, nil
+		}
+		return r.MsgSet.PartialTrailingMessage, nil
+	case defaultRecords:
+		if r.RecordBatch == nil {
+			return false, nil
+		}
+		return r.RecordBatch.PartialTrailingRecord, nil
+	}
+	return false, fmt.Errorf("unknown records type: %v", r.recordsType)
 }
